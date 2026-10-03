@@ -1,0 +1,69 @@
+from __future__ import annotations
+
+from uuid import uuid4
+
+from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+
+from backend.app.config import settings
+
+
+class AnalysisStore:
+    def __init__(self) -> None:
+        self._memory: dict[str, dict] = {}
+        self.client = None
+        self.db = None
+
+        try:
+            self.client = MongoClient(settings.mongodb_uri, serverSelectionTimeoutMS=2000)
+            self.client.admin.command("ping")
+            self.db = self.client[settings.database_name]
+            self.collection = self.db["analyses"]
+            self.collection.create_index("analysis_id", unique=True)
+        except Exception:
+            self.collection = None
+
+    def save_analysis(self, analysis: dict) -> dict:
+        analysis_id = analysis.get("analysis_id") or str(uuid4())
+        analysis["analysis_id"] = analysis_id
+
+        if self.collection is not None:
+            try:
+                self.collection.replace_one({"analysis_id": analysis_id}, analysis, upsert=True)
+            except PyMongoError:
+                pass
+        else:
+            self._memory[analysis_id] = analysis
+        return analysis
+
+    def get_analysis(self, analysis_id: str) -> dict | None:
+        if self.collection is not None:
+            try:
+                return self.collection.find_one({"analysis_id": analysis_id})
+            except PyMongoError:
+                return self._memory.get(analysis_id)
+        return self._memory.get(analysis_id)
+
+    def list_analyses(self) -> list[dict]:
+        if self.collection is not None:
+            try:
+                rows = list(self.collection.find({}).sort("created_at", -1))
+                return [{k: v for k, v in row.items() if k != "_id"} for row in rows]
+            except PyMongoError:
+                pass
+        return list(reversed(list(self._memory.values())))
+
+    def delete_analysis(self, analysis_id: str) -> bool:
+        if self.collection is not None:
+            try:
+                result = self.collection.delete_one({"analysis_id": analysis_id})
+                return result.deleted_count > 0
+            except PyMongoError:
+                pass
+        if analysis_id in self._memory:
+            del self._memory[analysis_id]
+            return True
+        return False
+
+
+analysis_store = AnalysisStore()

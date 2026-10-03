@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from backend.app.services.text_processor import clean_text
+
+
+SKILLS_FILE = Path(__file__).resolve().parents[2] / "data" / "skills.json"
+
+
+def load_skill_catalog() -> dict:
+    with open(SKILLS_FILE, "r", encoding="utf-8") as handle:
+        return json.load(handle)
+
+
+def normalize_skill_value(value: str) -> str:
+    text = clean_text(value).lower()
+    text = text.replace("_", " ")
+    return " ".join(text.split())
+
+
+def flatten_aliases(skills: dict) -> dict[str, str]:
+    alias_map: dict[str, str] = {}
+    for skill in skills.get("skills", []):
+        canonical = skill["name"]
+        aliases = skill.get("aliases", []) + [canonical]
+        for alias in aliases:
+            alias_map[normalize_skill_value(alias)] = canonical
+    return alias_map
+
+
+def extract_skill_matches(text: str, skill_catalog: dict | None = None) -> list[dict]:
+    catalog = skill_catalog or load_skill_catalog()
+    alias_map = flatten_aliases(catalog)
+    found: dict[str, dict] = {}
+    normalized_text = normalize_skill_value(text)
+
+    for alias_key, canonical_name in alias_map.items():
+        if alias_key in normalized_text:
+            metadata = next((skill for skill in catalog["skills"] if skill["name"] == canonical_name), None)
+            if metadata:
+                found[canonical_name] = {
+                    "name": canonical_name,
+                    "category": metadata.get("category", "General"),
+                    "confidence": metadata.get("confidence", 0.8),
+                }
+
+    return list(found.values())
+
+
+def extract_job_requirements(text: str) -> dict[str, list[str]]:
+    catalog = load_skill_catalog()
+    text_lower = text.lower()
+    skill_matches = extract_skill_matches(text, catalog)
+    required = []
+    preferred = []
+    for item in skill_matches:
+        label = "required"
+        if any(marker in text_lower for marker in ["preferred", "nice to have", "bonus", "plus", "advantage"]):
+            label = "preferred"
+        if any(marker in text_lower for marker in ["must have", "required", "required skills", "responsibilities"]):
+            label = "required"
+        if label == "required":
+            required.append(item["name"])
+        else:
+            preferred.append(item["name"])
+
+    return {
+        "required_skills": sorted(set(required)),
+        "preferred_skills": sorted(set(preferred)),
+        "skills": sorted({item["name"] for item in skill_matches}),
+    }

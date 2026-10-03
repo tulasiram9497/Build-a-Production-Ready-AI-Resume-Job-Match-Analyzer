@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import fitz
+from fastapi import HTTPException, UploadFile
+
+from backend.app.config import settings
+
+
+def validate_upload(file: UploadFile, max_size_mb: int | None = None) -> None:
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Resume file is required.")
+
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF resumes are supported.")
+
+    size_limit = (max_size_mb or settings.max_upload_size_mb) * 1024 * 1024
+    file.file.seek(0, 2)
+    file_size = file.file.tell()
+    file.file.seek(0)
+
+    if file_size > size_limit:
+        raise HTTPException(status_code=413, detail=f"PDF is larger than {settings.max_upload_size_mb}MB.")
+
+
+def extract_text_from_pdf(file: UploadFile) -> tuple[str, int]:
+    validate_upload(file)
+
+    content = file.file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Uploaded PDF is empty.")
+
+    try:
+        doc = fitz.open(stream=content, filetype="pdf")
+    except Exception as exc:  # pragma: no cover - robust error handling
+        raise HTTPException(status_code=400, detail="Unable to read the PDF file.") from exc
+
+    if doc.page_count == 0:
+        raise HTTPException(status_code=400, detail="The uploaded PDF does not contain any pages.")
+
+    pages: list[str] = []
+    for page in doc:
+        text = page.get_text("text")
+        pages.append(normalize_text(text))
+
+    doc.close()
+    extracted = "\n\n".join(pages).strip()
+    if not extracted:
+        raise HTTPException(status_code=400, detail="The PDF could be parsed but no readable text was found.")
+
+    return extracted, doc.page_count
+
+
+def normalize_text(raw_text: str) -> str:
+    if not raw_text:
+        return ""
+    text = raw_text.replace("\xa0", " ")
+    text = re.sub(r"\s+", " ", text)
+    text = text.replace("\n ", "\n")
+    return text.strip()

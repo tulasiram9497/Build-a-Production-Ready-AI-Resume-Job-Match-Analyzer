@@ -1,0 +1,93 @@
+from __future__ import annotations
+
+import math
+import re
+from datetime import datetime, timezone
+from typing import Any
+
+from backend.app.config import settings
+from backend.app.services.embedding_service import embedding_service
+from backend.app.services.skill_extractor import extract_skill_matches, load_skill_catalog
+from backend.app.services.text_processor import extract_keywords
+
+
+SCORING_WEIGHTS = {
+    "semantic_similarity": 0.40,
+    "required_skill_match": 0.35,
+    "preferred_skill_match": 0.15,
+    "experience_match": 0.10,
+}
+
+
+def clamp(value: float) -> float:
+    return max(0.0, min(100.0, value))
+
+
+def parse_experience_score(text: str) -> float:
+    years = re.findall(r"(\d+)(?:\+)?\s*years?", text.lower())
+    if years:
+        values = [int(v) for v in years]
+        return min(100.0, 60 + max(values) * 8)
+    keywords = [word for word in ["experience", "team", "production", "deployment", "leadership", "ml", "python", "aws"] if word in text.lower()]
+    return 70.0 if keywords else 50.0
+
+
+def analyze_resume_job_match(resume_text: str, job_description: str, resume_name: str | None = None, job_title: str | None = None, company_name: str | None = None) -> dict[str, Any]:
+    resume_skills = extract_skill_matches(resume_text)
+    job_skills = extract_skill_matches(job_description)
+    job_skill_names = {skill["name"] for skill in job_skills}
+    resume_skill_names = {skill["name"] for skill in resume_skills}
+    matched_skills = sorted(job_skill_names & resume_skill_names)
+    missing_skills = sorted(job_skill_names - resume_skill_names)
+
+    job_keywords = extract_keywords(job_description, top_n=12)
+    resume_keywords = extract_keywords(resume_text, top_n=12)
+    keyword_overlap = len(set(job_keywords) & set(resume_keywords)) / max(1, len(set(job_keywords))) * 100
+
+    resume_embedding = embedding_service.encode([resume_text])[0]
+    job_embedding = embedding_service.encode([job_description])[0]
+    semantic_similarity = embedding_service.cosine_similarity(resume_embedding, job_embedding) * 100
+
+    required_coverage = 0.0
+    preferred_coverage = 0.0
+    if job_skill_names:
+        required_coverage = (len(matched_skills) / max(1, len(job_skill_names))) * 100
+        preferred_coverage = min(100.0, required_coverage * 0.9 + keyword_overlap * 0.1)
+
+    experience_score = parse_experience_score(resume_text + " " + job_description)
+
+    overall_score = (
+        semantic_similarity * SCORING_WEIGHTS["semantic_similarity"]
+        + required_coverage * SCORING_WEIGHTS["required_skill_match"]
+        + preferred_coverage * SCORING_WEIGHTS["preferred_skill_match"]
+        + experience_score * SCORING_WEIGHTS["experience_match"]
+    )
+
+    overall_score = clamp(overall_score)
+    semantic_similarity = clamp(semantic_similarity)
+    required_coverage = clamp(required_coverage)
+    preferred_coverage = clamp(preferred_coverage)
+    experience_score = clamp(experience_score)
+
+    recommendations = [
+        f"Strengthen your experience in {skill} to align more closely with the role." for skill in missing_skills[:3]
+    ] or ["Continue building role-relevant skills and project evidence."]
+
+    result = {
+        "analysis_id": "",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "resume_name": resume_name,
+        "job_title": job_title,
+        "company_name": company_name,
+        "overall_score": round(overall_score, 2),
+        "semantic_score": round(semantic_similarity, 2),
+        "required_skill_score": round(required_coverage, 2),
+        "preferred_skill_score": round(preferred_coverage, 2),
+        "experience_match": round(experience_score, 2),
+        "matched_skills": matched_skills,
+        "missing_skills": missing_skills,
+        "recommendations": recommendations,
+        "important_keywords": job_keywords,
+        "learning_roadmap": [],
+    }
+    return result
